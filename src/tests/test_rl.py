@@ -5,17 +5,21 @@
 import unittest
 import json
 import random
+import tempfile
+import os
 from typing import Dict, List, Any, Optional
 from unittest.mock import patch, MagicMock
 
 from src.rl.agent import (
-    Agent, RandomAgent, QLearningAgent, REINFORCEAgent, HeuristicAgent, Action
+    Agent, RandomAgent, QLearningAgent, REINFORCEAgent, HeuristicAgent, 
+    Action, load_agent_from_file
 )
 from src.rl.experience_buffer import (
     Experience, ExperienceBuffer, PrioritizedExperienceBuffer, EpisodeBuffer
 )
 from src.rl.trainer import (
-    TrainingConfig, TrainingStats, RLTrainer, CurriculumTrainer
+    TrainingConfig, TrainingStats, RLTrainer, CurriculumTrainer,
+    TrainingStage, CurriculumLevel, TrainingError
 )
 
 
@@ -86,6 +90,18 @@ class TestRandomAgent(unittest.TestCase):
         next_observation = {"test": 2}
         
         self.agent.observe(observation, action, 1.0, next_observation, False)
+    
+    def test_save_load_random_agent(self):
+        """测试随机智能体保存/加载"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "random_agent.json")
+            
+            success = self.agent.save(filepath)
+            self.assertTrue(success)
+            
+            loaded_agent = RandomAgent("Loaded")
+            load_success = loaded_agent.load(filepath)
+            self.assertTrue(load_success)
 
 
 class TestQLearningAgent(unittest.TestCase):
@@ -107,6 +123,7 @@ class TestQLearningAgent(unittest.TestCase):
         self.assertEqual(self.agent.discount_factor, 0.95)
         self.assertEqual(self.agent.epsilon, 1.0)
         self.assertEqual(self.agent.epsilon_min, 0.01)
+        self.assertTrue(self.agent.training)
     
     def test_get_q_value_new_state(self):
         """测试新状态的Q值"""
@@ -158,6 +175,64 @@ class TestQLearningAgent(unittest.TestCase):
         size = self.agent.get_q_table_size()
         
         self.assertEqual(size, 2)
+    
+    def test_train_eval_modes(self):
+        """测试训练/评估模式切换"""
+        self.assertTrue(self.agent.training)
+        
+        self.agent.eval_mode()
+        self.assertFalse(self.agent.training)
+        
+        self.agent.train_mode()
+        self.assertTrue(self.agent.training)
+    
+    def test_eval_mode_no_exploration(self):
+        """测试评估模式下不进行探索"""
+        observation = {"available_tools": ["tool1", "tool2"]}
+        
+        self.agent._update_q_value("state", "tool1", 10.0, "next", 0, True)
+        self.agent._update_q_value("state", "tool2", 1.0, "next", 0, True)
+        
+        self.agent.eval_mode()
+        
+        with patch('src.rl.agent.QLearningAgent._extract_state_key', return_value="state"):
+            actions = [self.agent.act(observation) for _ in range(10)]
+        
+        tools = [a.tool for a in actions if a]
+        self.assertTrue(all(t == "tool1" for t in tools))
+    
+    def test_save_load_qlearning(self):
+        """测试Q学习智能体保存/加载"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "q_agent.json")
+            
+            self.agent._update_q_value("s1", "a1", 1.0, "s2", 0.5, False)
+            
+            q_size_before = self.agent.get_q_table_size()
+            epsilon_before = self.agent.epsilon
+            
+            success = self.agent.save(filepath)
+            self.assertTrue(success)
+            
+            loaded_agent = QLearningAgent("Loaded")
+            load_success = loaded_agent.load(filepath)
+            self.assertTrue(load_success)
+            
+            self.assertEqual(loaded_agent.get_q_table_size(), q_size_before)
+            self.assertAlmostEqual(loaded_agent.epsilon, epsilon_before)
+    
+    def test_load_agent_from_file(self):
+        """测试自动识别智能体类型加载"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "agent.json")
+            
+            success = self.agent.save(filepath)
+            self.assertTrue(success)
+            
+            loaded_agent = load_agent_from_file(filepath)
+            
+            self.assertIsNotNone(loaded_agent)
+            self.assertIsInstance(loaded_agent, QLearningAgent)
 
 
 class TestREINFORCEAgent(unittest.TestCase):
@@ -192,6 +267,21 @@ class TestREINFORCEAgent(unittest.TestCase):
         self.agent.observe(observation, action, 1.0, next_observation, False)
         
         self.assertEqual(len(self.agent.episode_buffer), 1)
+    
+    def test_save_load_reinforce(self):
+        """测试REINFORCE智能体保存/加载"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "reinforce_agent.json")
+            
+            observation = {"available_tools": ["a1", "a2"]}
+            self.agent.act(observation)
+            
+            success = self.agent.save(filepath)
+            self.assertTrue(success)
+            
+            loaded_agent = REINFORCEAgent("Loaded")
+            load_success = loaded_agent.load(filepath)
+            self.assertTrue(load_success)
 
 
 class TestHeuristicAgent(unittest.TestCase):
@@ -319,6 +409,21 @@ class TestExperienceBuffer(unittest.TestCase):
         self.buffer.clear()
         
         self.assertEqual(self.buffer.size(), 0)
+    
+    def test_len_method(self):
+        """测试__len__方法"""
+        exp = Experience(
+            state={"s": 1},
+            action=Action(tool="a", parameters={}),
+            reward=1.0,
+            next_state={"s": 2},
+            done=False
+        )
+        
+        self.buffer.add(exp)
+        self.buffer.add(exp)
+        
+        self.assertEqual(len(self.buffer), 2)
 
 
 class TestPrioritizedExperienceBuffer(unittest.TestCase):
@@ -397,11 +502,26 @@ class TestTrainingConfig(unittest.TestCase):
         """测试默认配置"""
         config = TrainingConfig()
         
-        self.assertEqual(config.max_episodes, 100)
-        self.assertEqual(config.max_steps_per_episode, 50)
+        self.assertEqual(config.max_episodes, 1000)
+        self.assertEqual(config.max_steps_per_episode, 100)
         self.assertEqual(config.learning_rate, 0.1)
         self.assertEqual(config.discount_factor, 0.99)
         self.assertEqual(config.epsilon, 1.0)
+        self.assertTrue(config.use_prioritized_replay)
+        self.assertTrue(config.log_to_file)
+        self.assertTrue(config.show_progress)
+    
+    def test_custom_config(self):
+        """测试自定义配置"""
+        config = TrainingConfig(
+            max_episodes=50,
+            early_stop_patience=20,
+            separate_eval_env=False
+        )
+        
+        self.assertEqual(config.max_episodes, 50)
+        self.assertEqual(config.early_stop_patience, 20)
+        self.assertFalse(config.separate_eval_env)
 
 
 class TestTrainingStats(unittest.TestCase):
@@ -419,6 +539,64 @@ class TestTrainingStats(unittest.TestCase):
         
         self.assertEqual(stats.episodes_trained, 100)
         self.assertEqual(stats.avg_reward_per_episode, 10.0)
+    
+    def test_get_summary(self):
+        """测试获取统计摘要"""
+        stats = TrainingStats(
+            episodes_trained=50,
+            total_steps=200,
+            total_reward=500.0
+        )
+        
+        summary = stats.get_summary()
+        
+        self.assertEqual(summary["episodes_trained"], 50)
+        self.assertIn("avg_reward", summary)
+
+
+class SimpleTestEnvironment:
+    """简单测试环境"""
+    
+    def __init__(self, difficulty=1):
+        self.difficulty = difficulty
+        self.state = 0
+        self.max_state = 5 * difficulty
+        self.available_tools = ["move_right", "move_left"]
+    
+    def reset(self):
+        self.state = 0
+        return {
+            "current_state": "running",
+            "state_variables": {"position": self.state},
+            "available_tools": self.available_tools
+        }
+    
+    def execute_tool(self, tool, **kwargs):
+        if tool == "move_right":
+            self.state = min(self.max_state, self.state + 1)
+            reward = 0.1
+        elif tool == "move_left":
+            self.state = max(0, self.state - 1)
+            reward = -0.1
+        else:
+            reward = -0.5
+        
+        done = False
+        info = {}
+        
+        if self.state >= self.max_state:
+            done = True
+            reward = 10.0 * self.difficulty
+            info["success"] = True
+        
+        return "", reward, done, info
+    
+    def get_observation(self):
+        return {
+            "current_state": "running" if self.state < self.max_state else "terminal",
+            "state_variables": {"position": self.state},
+            "available_tools": self.available_tools
+        }
 
 
 class TestRLTrainer(unittest.TestCase):
@@ -426,16 +604,18 @@ class TestRLTrainer(unittest.TestCase):
     
     def setUp(self):
         self.config = TrainingConfig(
-            max_episodes=10,
-            max_steps_per_episode=5,
-            verbose=False
+            max_episodes=5,
+            max_steps_per_episode=10,
+            verbose=False,
+            log_to_file=False,
+            show_progress=False
         )
         self.trainer = RLTrainer(self.config)
     
     def test_trainer_initialization(self):
         """测试训练器初始化"""
-        self.assertEqual(self.trainer.config.max_episodes, 10)
-        self.assertEqual(self.trainer.config.max_steps_per_episode, 5)
+        self.assertEqual(self.trainer.config.max_episodes, 5)
+        self.assertEqual(self.trainer.config.max_steps_per_episode, 10)
     
     def test_training_stats_initial(self):
         """测试初始训练统计"""
@@ -443,6 +623,76 @@ class TestRLTrainer(unittest.TestCase):
         
         self.assertEqual(stats.episodes_trained, 0)
         self.assertEqual(stats.total_steps, 0)
+    
+    def test_simple_training(self):
+        """测试简单训练"""
+        agent = QLearningAgent("TestAgent")
+        env = SimpleTestEnvironment(difficulty=1)
+        
+        stats = self.trainer.train(agent, env)
+        
+        self.assertGreater(len(stats.episode_rewards), 0)
+    
+    def test_save_load_checkpoint(self):
+        """测试Checkpoint保存/加载"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = QLearningAgent("TestAgent")
+            env = SimpleTestEnvironment(difficulty=1)
+            
+            self.trainer.train(agent, env)
+            
+            checkpoint_path = os.path.join(tmpdir, "checkpoint.json")
+            success = self.trainer.save_checkpoint(checkpoint_path, agent)
+            self.assertTrue(success)
+            
+            new_trainer = RLTrainer(self.config)
+            load_success = new_trainer.load_checkpoint(checkpoint_path)
+            self.assertTrue(load_success)
+
+
+class TestCurriculumLevel(unittest.TestCase):
+    """测试课程级别"""
+    
+    def test_level_creation(self):
+        """测试级别创建"""
+        def env_creator():
+            return SimpleTestEnvironment(difficulty=1)
+        
+        level = CurriculumLevel(
+            level_id="easy",
+            difficulty=1,
+            environment_creator=env_creator,
+            min_success_rate=0.7,
+            min_consecutive_success=3,
+            max_episodes_per_level=50,
+            description="简单级别"
+        )
+        
+        self.assertEqual(level.level_id, "easy")
+        self.assertEqual(level.difficulty, 1)
+        self.assertEqual(level.min_success_rate, 0.7)
+    
+    def test_level_check_progression(self):
+        """测试级别升级检查"""
+        def env_creator():
+            return SimpleTestEnvironment(difficulty=1)
+        
+        level = CurriculumLevel(
+            level_id="test",
+            difficulty=1,
+            environment_creator=env_creator,
+            min_success_rate=0.7,
+            min_consecutive_success=2,
+            max_episodes_per_level=10
+        )
+        
+        level.level_stats["episodes_trained"] = 5
+        level.level_stats["success_rate"] = 0.8
+        level.level_stats["consecutive_successes"] = 3
+        level.level_stats["avg_reward"] = 10.0
+        
+        can_progress = level.can_progress()
+        self.assertTrue(can_progress)
 
 
 class TestCurriculumTrainer(unittest.TestCase):
@@ -450,32 +700,43 @@ class TestCurriculumTrainer(unittest.TestCase):
     
     def setUp(self):
         self.config = TrainingConfig(
-            max_episodes=10,
-            max_steps_per_episode=5,
-            verbose=False
+            max_episodes=50,
+            max_steps_per_episode=10,
+            verbose=False,
+            log_to_file=False,
+            show_progress=False
         )
         self.trainer = CurriculumTrainer(self.config)
     
-    def test_add_curriculum_stage(self):
-        """测试添加课程阶段"""
-        self.trainer.add_stage(
-            stage_id="easy",
-            description="简单阶段",
+    def test_add_level(self):
+        """测试添加级别"""
+        def create_env_diff1():
+            return SimpleTestEnvironment(difficulty=1)
+        
+        self.trainer.add_level(
+            level_id="easy",
             difficulty=1,
-            config_override={"max_steps_per_episode": 10}
+            environment_creator=create_env_diff1,
+            min_success_rate=0.7,
+            min_consecutive_success=2,
+            max_episodes_per_level=50,
+            description="简单"
         )
         
-        self.assertEqual(len(self.trainer.curriculum_stages), 1)
+        self.assertEqual(len(self.trainer.levels), 1)
     
-    def test_get_current_stage(self):
-        """测试获取当前阶段"""
-        self.trainer.add_stage("stage1", "阶段1", 1)
-        self.trainer.add_stage("stage2", "阶段2", 2)
+    def test_get_level_progress(self):
+        """测试获取级别进度"""
+        def create_env1():
+            return SimpleTestEnvironment(difficulty=1)
         
-        stage = self.trainer.get_current_stage()
+        self.trainer.add_level("easy", 1, create_env1)
         
-        self.assertIsNotNone(stage)
-        self.assertEqual(stage["stage_id"], "stage1")
+        progress = self.trainer.get_level_progress()
+        
+        self.assertEqual(len(progress), 1)
+        self.assertEqual(progress[0]["level_id"], "easy")
+        self.assertFalse(progress[0]["completed"])
 
 
 if __name__ == "__main__":
