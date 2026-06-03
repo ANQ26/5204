@@ -4,10 +4,14 @@
 
 from .agent import Agent, QLearningAgent, REINFORCEAgent
 from .experience_buffer import ExperienceBuffer, PrioritizedExperienceBuffer
-from .trainer import RLTrainer, TrainingConfig
+from .trainer import (
+    RLTrainer, TrainingConfig, CurriculumTrainer,
+    EarlyStopMonitor, ExceptionGuard, ConsoleProgressBar
+)
 
 __all__ = [
     "Agent", "QLearningAgent", "REINFORCEAgent",
     "ExperienceBuffer", "PrioritizedExperienceBuffer",
-    "RLTrainer", "TrainingConfig"
+    "RLTrainer", "TrainingConfig", "CurriculumTrainer",
+    "EarlyStopMonitor", "ExceptionGuard", "ConsoleProgressBar"
 ]

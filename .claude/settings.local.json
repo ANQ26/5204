@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest src/tests/test_rl.py -v)",
+      "Bash(python -c \"from src.rl.trainer import RLTrainer, TrainingConfig, EarlyStopMonitor, ExceptionGuard, ConsoleProgressBar; print\\('Import OK'\\)\")",
+      "Bash(where python *)",
+      "Bash(python -V)",
+      "Bash(ls /c/Python*)",
+      "Read(//c/Users/ANQ/AppData/Local/Programs/Python/**)",
+      "Read(//c/Users/ANQ/**)",
+      "Bash(/c/Users/ANQ/AppData/Local/Programs/Python/Python313/python.exe *)"
+    ]
+  }
+}

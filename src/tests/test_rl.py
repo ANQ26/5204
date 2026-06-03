@@ -686,13 +686,44 @@ class TestCurriculumLevel(unittest.TestCase):
             max_episodes_per_level=10
         )
         
-        level.level_stats["episodes_trained"] = 5
-        level.level_stats["success_rate"] = 0.8
-        level.level_stats["consecutive_successes"] = 3
-        level.level_stats["avg_reward"] = 10.0
+        level.episodes_trained = 5
+        level.consecutive_successes = 3
+        level.recent_successes = [True] * 10
+        level.recent_rewards = [10.0] * 10
         
         can_progress = level.can_progress()
         self.assertTrue(can_progress)
+    
+    def test_level_get_set_state(self):
+        """测试级别状态序列化/反序列化"""
+        def env_creator():
+            return SimpleTestEnvironment(difficulty=1)
+        
+        level = CurriculumLevel(
+            level_id="test",
+            difficulty=1,
+            environment_creator=env_creator,
+            min_consecutive_success=2
+        )
+        
+        level.episodes_trained = 15
+        level.consecutive_successes = 5
+        level.completed = True
+        
+        state = level.get_state()
+        self.assertEqual(state["level_id"], "test")
+        self.assertEqual(state["episodes_trained"], 15)
+        self.assertTrue(state["completed"])
+        
+        new_level = CurriculumLevel(
+            level_id="test",
+            difficulty=1,
+            environment_creator=env_creator,
+            min_consecutive_success=2
+        )
+        new_level.load_state(state)
+        self.assertEqual(new_level.episodes_trained, 15)
+        self.assertTrue(new_level.completed)
 
 
 class TestCurriculumTrainer(unittest.TestCase):
@@ -723,7 +754,7 @@ class TestCurriculumTrainer(unittest.TestCase):
             description="简单"
         )
         
-        self.assertEqual(len(self.trainer.levels), 1)
+        self.assertEqual(len(self.trainer.curriculum_levels), 1)
     
     def test_get_level_progress(self):
         """测试获取级别进度"""
@@ -737,6 +768,20 @@ class TestCurriculumTrainer(unittest.TestCase):
         self.assertEqual(len(progress), 1)
         self.assertEqual(progress[0]["level_id"], "easy")
         self.assertFalse(progress[0]["completed"])
+    
+    def test_build_curriculum_extra_info(self):
+        """测试课程进度状态构建"""
+        def create_env1():
+            return SimpleTestEnvironment(difficulty=1)
+        
+        self.trainer.add_level("easy", 1, create_env1)
+        self.trainer.curriculum_levels[0].completed = True
+        
+        info = self.trainer._build_curriculum_extra_info("test")
+        
+        self.assertEqual(info["stop_reason"], "test")
+        self.assertIn("easy", info["completed_levels"])
+        self.assertIn("curriculum_progress", info)
 
 
 if __name__ == "__main__":

@@ -2,33 +2,34 @@
 改进版训练演示 - 展示所有新功能
 
 演示内容：
-1. 完整的异常处理
-2. 模型保存/加载功能
-3. 经验回放自动学习
-4. 日志文件系统
-5. 进度条展示
-6. 改进的课程学习设计
+1. 断点续训：中断后可加载模型接续训练
+2. 自动保存最优模型：留存训练过程中效果最好的权重文件
+3. 简易控制台进度条：实时展示单回合与整体训练进度
+4. 运行异常捕获模块：报错自动记录日志且程序不会直接终止
+5. 早停判定机制：连续多轮收益无提升时自动终止无效训练
+6. 经验回放自动学习集成
 7. 训练/评估模式分离
-8. 早停机制
+8. 改进的课程学习设计
 """
 
 import os
 import sys
+import random
 import tempfile
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable
 
-# 添加父目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.rl.agent import (
-    QLearningAgent, REINFORCEAgent, HeuristicAgent, 
+    QLearningAgent, REINFORCEAgent, HeuristicAgent,
     RandomAgent, Action, load_agent_from_file
 )
 from src.rl.trainer import (
-    TrainingConfig, RLTrainer, CurriculumTrainer, 
-    TrainingStage, TrainingError
+    TrainingConfig, RLTrainer, CurriculumTrainer,
+    TrainingStage, TrainingError, EarlyStopMonitor,
+    ExceptionGuard, ConsoleProgressBar
 )
 from src.rl.experience_buffer import ExperienceBuffer, Experience
 from src.sandbox.environment_manager import EnvironmentManager
@@ -36,14 +37,14 @@ from src.sandbox.environment_manager import EnvironmentManager
 
 class SimpleTestEnvironment:
     """简单的测试环境，用于演示"""
-    
+
     def __init__(self, difficulty: int = 1):
         self.difficulty = difficulty
         self.state: int = 0
         self.max_state: int = 10 * difficulty
         self.total_steps: int = 0
         self.available_tools: List[str] = ["move_left", "move_right", "stay"]
-        
+
     def reset(self) -> Dict[str, Any]:
         self.state = 0
         self.total_steps = 0
@@ -53,10 +54,10 @@ class SimpleTestEnvironment:
             "available_tools": self.available_tools,
             "max_position": self.max_state
         }
-    
+
     def execute_tool(self, tool: str, **kwargs) -> tuple:
         self.total_steps += 1
-        
+
         if tool == "move_right":
             self.state = min(self.max_state, self.state + 1)
             reward = 0.1
@@ -67,27 +68,27 @@ class SimpleTestEnvironment:
             reward = 0.0
         else:
             reward = -0.5
-        
+
         done = False
         info = {}
-        
+
         if self.state >= self.max_state:
             done = True
             reward = 100.0 * self.difficulty
             info["success"] = True
             info["message"] = f"成功到达目标位置！难度={self.difficulty}"
-        
+
         if self.total_steps >= 100 * self.difficulty:
             done = True
             reward = -10.0
             info["success"] = False
             info["message"] = "超时"
-        
+
         info["position"] = self.state
         info["steps"] = self.total_steps
-        
+
         return f"Position: {self.state}", reward, done, info
-    
+
     def get_observation(self) -> Dict[str, Any]:
         return {
             "current_state": "terminal" if self.state >= self.max_state else "running",
@@ -104,273 +105,438 @@ def create_environment_creator(difficulty: int) -> Callable:
     return creator
 
 
-def demo_exception_handling():
-    """演示异常处理"""
+def demo_checkpoint_resume():
+    """演示断点续训功能"""
     print("\n" + "=" * 60)
-    print("演示 1: 完整的异常处理")
+    print("演示 1: 断点续训 - 中断后可加载模型接续训练")
     print("=" * 60)
-    
-    config = TrainingConfig(
-        max_episodes=5,
-        max_steps_per_episode=10,
-        verbose=True,
-        log_to_file=False,
-        show_progress=False
-    )
-    
-    trainer = RLTrainer(config)
-    
-    class FailingEnvironment:
-        def reset(self):
-            raise RuntimeError("环境重置失败！")
-        
-        def execute_tool(self, *args, **kwargs):
-            raise RuntimeError("执行动作失败！")
-        
-        def get_observation(self):
-            return {}
-    
-    agent = QLearningAgent("TestAgent")
-    bad_env = FailingEnvironment()
-    
-    print("\n测试环境重置异常...")
-    try:
-        trainer.train(agent, bad_env)
-    except Exception as e:
-        print(f"  ✓ 正确捕获异常: {type(e).__name__}")
-    
-    print("\n✓ 异常处理演示完成")
 
-
-def demo_model_save_load():
-    """演示模型保存/加载"""
-    print("\n" + "=" * 60)
-    print("演示 2: 模型保存/加载功能")
-    print("=" * 60)
-    
     with tempfile.TemporaryDirectory() as tmpdir:
-        save_path = os.path.join(tmpdir, "test_agent.json")
-        
-        print(f"\n创建Q学习智能体并训练...")
-        agent1 = QLearningAgent(
-            name="TestAgent",
-            learning_rate=0.2,
-            epsilon=0.5
-        )
-        
-        env = SimpleTestEnvironment(difficulty=1)
-        for episode in range(20):
-            obs = env.reset()
-            done = False
-            while not done:
-                action = agent1.act(obs)
-                if action is None:
-                    break
-                result, reward, done, info = env.execute_tool(action.tool, **action.parameters)
-                next_obs = env.get_observation()
-                agent1.observe(obs, action, reward, next_obs, done)
-                obs = next_obs
-        
-        q_table_size_before = agent1.get_q_table_size()
-        epsilon_before = agent1.epsilon
-        
-        print(f"  训练完成: Q表大小={q_table_size_before}, epsilon={epsilon_before:.4f}")
-        
-        print(f"\n保存智能体到: {save_path}")
-        success = agent1.save(save_path)
-        print(f"  保存{'成功' if success else '失败'}")
-        
-        if success:
-            print("\n加载保存的智能体...")
-            agent2 = QLearningAgent("LoadedAgent")
-            load_success = agent2.load(save_path)
-            print(f"  加载{'成功' if load_success else '失败'}")
-            
-            if load_success:
-                print(f"\n比较参数:")
-                print(f"  原智能体 - name: {agent1.name}, epsilon: {agent1.epsilon:.4f}")
-                print(f"  加载后   - name: {agent2.name}, epsilon: {agent2.epsilon:.4f}")
-                print(f"  Q表大小: 原={agent1.get_q_table_size()}, 加载后={agent2.get_q_table_size()}")
-                
-                print("\n✓ 模型保存/加载演示完成")
-            
-            print("\n测试 load_agent_from_file 函数...")
-            agent3 = load_agent_from_file(save_path)
-            if agent3:
-                print(f"  ✓ 成功自动识别类型: {type(agent3).__name__}")
-            else:
-                print("  ✗ 加载失败")
-
-
-def demo_experience_replay_integration():
-    """演示经验回放集成"""
-    print("\n" + "=" * 60)
-    print("演示 3: 经验回放自动学习")
-    print("=" * 60)
-    
-    config = TrainingConfig(
-        max_episodes=30,
-        max_steps_per_episode=50,
-        batch_size=16,
-        replay_update_freq=4,
-        min_replay_size=20,
-        use_prioritized_replay=True,
-        eval_freq=10,
-        verbose=True,
-        log_to_file=False,
-        show_progress=False
-    )
-    
-    print("\n创建训练器（带优先经验回放）...")
-    trainer = RLTrainer(config)
-    
-    print(f"  回放缓冲区容量: {trainer.config.replay_buffer_capacity}")
-    print(f"  优先经验回放: {trainer.config.use_prioritized_replay}")
-    print(f"  回放更新频率: 每 {trainer.config.replay_update_freq} 步")
-    
-    agent = QLearningAgent(
-        name="ReplayAgent",
-        learning_rate=0.15,
-        epsilon=0.8,
-        epsilon_decay=0.95
-    )
-    
-    env = SimpleTestEnvironment(difficulty=2)
-    
-    print("\n开始训练（经验回放自动学习）...")
-    
-    initial_q_size = agent.get_q_table_size()
-    stats = trainer.train(agent, env)
-    
-    final_q_size = agent.get_q_table_size()
-    buffer_size = len(trainer.replay_buffer)
-    
-    print(f"\n训练结果:")
-    print(f"  Q表大小: {initial_q_size} -> {final_q_size}")
-    print(f"  回放缓冲区样本数: {buffer_size}")
-    print(f"  总回合数: {len(stats.episode_rewards)}")
-    print(f"  平均奖励: {stats.get_summary()['avg_reward']:.2f}")
-    
-    print("\n✓ 经验回放集成演示完成")
-
-
-def demo_logging_system():
-    """演示日志文件系统"""
-    print("\n" + "=" * 60)
-    print("演示 4: 日志文件系统")
-    print("=" * 60)
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config = TrainingConfig(
-            max_episodes=10,
-            max_steps_per_episode=20,
+        # 第一阶段：训练一段后保存
+        print("\n[第一阶段] 训练 30 回合后保存检查点...")
+        config1 = TrainingConfig(
+            max_episodes=30,
+            max_steps_per_episode=50,
+            save_freq=30,
             verbose=True,
             log_dir=tmpdir,
             log_to_file=True,
-            log_to_console=True,
-            show_progress=False
+            log_to_console=False,
+            show_progress=False,
+            early_stop_patience=0,
+            separate_eval_env=False
         )
-        
-        print(f"\n创建带日志的训练器...")
-        print(f"  日志目录: {tmpdir}")
-        print(f"  日志到文件: {config.log_to_file}")
-        print(f"  日志到控制台: {config.log_to_console}")
-        
-        trainer = RLTrainer(config)
-        agent = QLearningAgent("LoggingAgent")
+
+        trainer1 = RLTrainer(config1)
+        agent1 = QLearningAgent(
+            name="ResumeTestAgent",
+            learning_rate=0.2,
+            epsilon=0.8,
+            epsilon_decay=0.95
+        )
         env = SimpleTestEnvironment(difficulty=1)
-        
-        print("\n开始训练...")
-        trainer.train(agent, env)
-        
-        log_file = trainer.get_log_file()
-        print(f"\n日志文件: {log_file}")
-        
-        if log_file and os.path.exists(log_file):
-            print("\n查看日志内容（前20行）:")
-            with open(log_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()[:20]
-                for line in lines:
-                    print(f"  {line.rstrip()}")
-        
-        print("\n✓ 日志文件系统演示完成")
+
+        stats1 = trainer1.train(agent1, env)
+
+        print(f"  第一阶段完成: {len(stats1.episode_rewards)} 回合")
+        print(f"  最终 epsilon: {agent1.epsilon:.4f}")
+        print(f"  Q表大小: {agent1.get_q_table_size()}")
+        print(f"  最佳训练奖励: {stats1.best_training_reward:.2f}")
+
+        # 找到保存的检查点
+        checkpoint_path = os.path.join(tmpdir, "final_checkpoint.json")
+        assert os.path.exists(checkpoint_path), "检查点文件应当存在"
+
+        # 第二阶段：从检查点恢复，继续训练
+        print("\n[第二阶段] 从检查点恢复，继续训练 30 回合...")
+        config2 = TrainingConfig(
+            max_episodes=60,
+            max_steps_per_episode=50,
+            save_freq=100,
+            verbose=True,
+            log_dir=tmpdir,
+            log_to_file=True,
+            log_to_console=False,
+            show_progress=False,
+            early_stop_patience=0,
+            resume_from_checkpoint=checkpoint_path,
+            separate_eval_env=False
+        )
+
+        trainer2 = RLTrainer(config2)
+        agent2 = QLearningAgent(name="ResumeTestAgent")
+        env2 = SimpleTestEnvironment(difficulty=1)
+
+        stats2 = trainer2.train(agent2, env2)
+
+        print(f"  第二阶段完成: 总计 {len(stats2.episode_rewards)} 回合")
+        print(f"  恢复后 epsilon: {agent2.epsilon:.4f}")
+        print(f"  恢复后 Q表大小: {agent2.get_q_table_size()}")
+        print(f"  最佳训练奖励: {stats2.best_training_reward:.2f}")
+
+        # 验证续训有效
+        assert len(stats2.episode_rewards) > len(stats1.episode_rewards), \
+            "续训后总回合数应当增加"
+        assert agent2.get_q_table_size() >= agent1.get_q_table_size(), \
+            "续训后 Q表不应缩小"
+
+        print("\n  [验证通过] 断点续训成功，训练状态和模型权重均已恢复")
+    print("\n  ✓ 断点续训演示完成")
 
 
-def demo_training_eval_modes():
-    """演示训练/评估模式分离"""
+def demo_auto_save_best_model():
+    """演示自动保存最优模型"""
     print("\n" + "=" * 60)
-    print("演示 5: 训练/评估模式分离")
+    print("演示 2: 自动保存最优模型 - 留存最佳权重文件")
     print("=" * 60)
-    
-    agent = QLearningAgent(
-        name="ModeAgent",
-        epsilon=1.0,
-        epsilon_decay=1.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        best_dir = os.path.join(tmpdir, "best_models")
+
+        config = TrainingConfig(
+            max_episodes=50,
+            max_steps_per_episode=50,
+            eval_freq=10,
+            eval_episodes=5,
+            verbose=True,
+            log_dir=tmpdir,
+            log_to_file=True,
+            log_to_console=False,
+            show_progress=False,
+            early_stop_patience=0,
+            auto_save_best=True,
+            best_model_dir=best_dir,
+            separate_eval_env=False
+        )
+
+        trainer = RLTrainer(config)
+        agent = QLearningAgent(
+            name="BestModelAgent",
+            learning_rate=0.2,
+            epsilon=0.7,
+            epsilon_decay=0.95
+        )
+        env = SimpleTestEnvironment(difficulty=1)
+        eval_env = SimpleTestEnvironment(difficulty=1)
+
+        print("\n  开始训练（每10回合评估一次，自动保存最优模型）...")
+        stats = trainer.train(agent, env, eval_environment=eval_env)
+
+        # 检查最优模型是否保存
+        best_agent_path = os.path.join(best_dir, "best_model_agent.json")
+        best_meta_path = os.path.join(best_dir, "best_model_meta.json")
+
+        if os.path.exists(best_agent_path):
+            print(f"\n  最优模型已保存:")
+            print(f"    智能体权重: {best_agent_path}")
+
+            with open(best_meta_path, 'r') as f:
+                meta = json.load(f)
+            print(f"    最优指标值: {meta['metric_value']:.2f}")
+            print(f"    保存时回合: {meta['episode']}")
+            print(f"    保存时间: {meta['timestamp']}")
+
+            # 验证可以加载最优模型
+            loaded_agent = QLearningAgent("LoadedBest")
+            loaded_agent.load(best_agent_path)
+            print(f"    加载验证: Q表大小={loaded_agent.get_q_table_size()}")
+        else:
+            print("\n  (训练中未触发评估改进，无最优模型保存)")
+
+        print(f"\n  训练器记录的最优模型路径: {trainer.get_best_model_path()}")
+    print("\n  ✓ 自动保存最优模型演示完成")
+
+
+def demo_console_progress_bar():
+    """演示简易控制台进度条"""
+    print("\n" + "=" * 60)
+    print("演示 3: 简易控制台进度条 - 实时展示训练进度")
+    print("=" * 60)
+
+    print("\n  [内置进度条展示] 不依赖 tqdm 的控制台进度条:")
+    print()
+
+    # 直接展示 ConsoleProgressBar
+    bar = ConsoleProgressBar(total=20, desc="  训练")
+    import time
+    for i in range(20):
+        time.sleep(0.05)
+        bar.update(1, postfix={'R': f'{random.uniform(-5, 10):.1f}',
+                               'eps': f'{1.0 - i*0.04:.2f}'},
+                   step_info=f"步={random.randint(5, 30)}")
+    bar.close()
+
+    print("\n  [集成训练进度条展示]:")
+    print()
+
+    config = TrainingConfig(
+        max_episodes=15,
+        max_steps_per_episode=30,
+        verbose=False,
+        log_to_file=False,
+        log_to_console=False,
+        show_progress=True,
+        early_stop_patience=0,
+        separate_eval_env=False
     )
-    
-    print(f"\n初始状态:")
-    print(f"  training: {agent.training}")
-    print(f"  epsilon: {agent.epsilon}")
-    
-    obs = {
-        "available_tools": ["action1", "action2"],
-        "state_variables": {"x": 0}
-    }
-    
-    print("\n训练模式下的动作选择（高探索率）:")
-    actions_train = []
-    for _ in range(20):
-        action = agent.act(obs)
-        if action:
-            actions_train.append(action.tool)
-    
-    tool_counts_train = {k: actions_train.count(k) for k in set(actions_train)}
-    print(f"  动作分布: {tool_counts_train}")
-    
-    print("\n切换到评估模式...")
-    agent.eval_mode()
-    print(f"  training: {agent.training}")
-    
-    print("\n评估模式下的动作选择（无探索）:")
-    actions_eval = []
-    for _ in range(20):
-        action = agent.act(obs)
-        if action:
-            actions_eval.append(action.tool)
-    
-    tool_counts_eval = {k: actions_eval.count(k) for k in set(actions_eval)}
-    print(f"  动作分布: {tool_counts_eval}")
-    
-    print("\n切换回训练模式...")
-    agent.train_mode()
-    print(f"  training: {agent.training}")
-    
-    print("\n✓ 训练/评估模式分离演示完成")
+
+    trainer = RLTrainer(config)
+    agent = QLearningAgent("ProgressAgent", epsilon=0.5)
+    env = SimpleTestEnvironment(difficulty=1)
+    trainer.train(agent, env)
+
+    print("\n  ✓ 控制台进度条演示完成")
+
+
+def demo_exception_guard():
+    """演示运行异常捕获模块"""
+    print("\n" + "=" * 60)
+    print("演示 4: 运行异常捕获模块 - 报错自动记录不终止程序")
+    print("=" * 60)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = TrainingConfig(
+            max_episodes=20,
+            max_steps_per_episode=10,
+            verbose=True,
+            log_dir=tmpdir,
+            log_to_file=True,
+            log_to_console=False,
+            show_progress=False,
+            early_stop_patience=0,
+            separate_eval_env=False
+        )
+
+        trainer = RLTrainer(config)
+
+        # 创建一个间歇性失败的环境
+        class FlakyEnvironment:
+            def __init__(self):
+                self.state = 0
+                self.call_count = 0
+
+            def reset(self):
+                self.call_count += 1
+                if self.call_count % 5 == 0:
+                    raise RuntimeError("模拟环境重置异常！")
+                self.state = 0
+                return {
+                    "current_state": "running",
+                    "state_variables": {"s": self.state},
+                    "available_tools": ["action1", "action2"]
+                }
+
+            def execute_tool(self, tool, **kwargs):
+                self.state += 1
+                if random.random() < 0.1:
+                    raise ValueError("模拟执行异常！")
+                done = self.state >= 8
+                return "", 1.0, done, {"success": done}
+
+            def get_observation(self):
+                return {
+                    "current_state": "running",
+                    "state_variables": {"s": self.state},
+                    "available_tools": ["action1", "action2"]
+                }
+
+        agent = QLearningAgent("FlakyAgent")
+        flaky_env = FlakyEnvironment()
+
+        print("\n  使用间歇性异常环境进行训练（部分回合会报错）...")
+        stats = trainer.train(agent, flaky_env)
+
+        print(f"\n  训练结果（程序未终止）:")
+        print(f"    完成回合数: {len(stats.episode_rewards)}")
+        print(f"    平均奖励: {stats.get_summary().get('avg_reward', 0):.2f}")
+
+        # 查看异常统计
+        err_summary = trainer.get_exception_summary()
+        print(f"\n  异常统计:")
+        print(f"    总异常次数: {err_summary['total_errors']}")
+        print(f"    异常类型: {err_summary['error_types']}")
+        print(f"    异常日志文件: {err_summary['crash_log_path']}")
+
+        if err_summary['crash_log_path'] and os.path.exists(err_summary['crash_log_path']):
+            with open(err_summary['crash_log_path'], 'r') as f:
+                lines = f.readlines()
+            print(f"    日志条目数: {len(lines)}")
+            if lines:
+                first_error = json.loads(lines[0])
+                print(f"    首条异常: [{first_error['error_type']}] {first_error['message']}")
+
+    print("\n  ✓ 异常捕获模块演示完成")
+
+
+def demo_early_stop_mechanism():
+    """演示早停判定机制"""
+    print("\n" + "=" * 60)
+    print("演示 5: 早停判定机制 - 连续多轮无提升自动终止")
+    print("=" * 60)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 使用 EarlyStopMonitor 独立演示
+        print("\n  [独立早停监控器演示]:")
+        monitor = EarlyStopMonitor(patience=5, min_improvement=0.5, metric="train_reward")
+
+        rewards = [1.0, 2.0, 3.0, 3.5, 3.6, 3.65, 3.66, 3.67, 3.68, 3.69, 3.70]
+        for i, r in enumerate(rewards):
+            should_continue = monitor.step(r)
+            status = "继续" if should_continue else "停止"
+            print(f"    回合{i+1}: 奖励={r:.2f}, 最佳={monitor.best_value:.2f}, "
+                  f"无改进轮数={monitor.rounds_without_improvement}, {status}")
+            if not should_continue:
+                print(f"    -> 早停原因: {monitor.reason}")
+                break
+
+        # 集成到训练器中演示
+        print("\n  [集成训练早停演示]:")
+        config = TrainingConfig(
+            max_episodes=200,
+            max_steps_per_episode=20,
+            early_stop_patience=15,
+            early_stop_min_improvement=0.01,
+            early_stop_metric="train_reward",
+            verbose=True,
+            log_dir=tmpdir,
+            log_to_file=False,
+            log_to_console=False,
+            show_progress=False,
+            separate_eval_env=False
+        )
+
+        trainer = RLTrainer(config)
+
+        class PlateauEnvironment:
+            """奖励会在一定回合后趋于平坦的环境"""
+            def __init__(self):
+                self.state = 0
+                self.available_tools = ["move"]
+
+            def reset(self):
+                self.state = 0
+                return {
+                    "current_state": "running",
+                    "state_variables": {"s": self.state},
+                    "available_tools": self.available_tools
+                }
+
+            def execute_tool(self, *args, **kwargs):
+                self.state += 1
+                reward = random.uniform(0.4, 0.6)
+                done = self.state >= 10
+                return "", reward, done, {"success": False}
+
+            def get_observation(self):
+                return {
+                    "current_state": "running" if self.state < 10 else "terminal",
+                    "state_variables": {"s": self.state},
+                    "available_tools": self.available_tools
+                }
+
+        agent = QLearningAgent("EarlyStopAgent")
+        env = PlateauEnvironment()
+
+        stats = trainer.train(agent, env)
+
+        actual_episodes = len(stats.episode_rewards)
+        print(f"\n  训练结果:")
+        print(f"    配置最大回合: {config.max_episodes}")
+        print(f"    实际训练回合: {actual_episodes}")
+        print(f"    早停状态: {trainer.get_early_stop_state()}")
+
+        if actual_episodes < config.max_episodes:
+            print(f"    ✓ 早停生效！提前 {config.max_episodes - actual_episodes} 回合终止")
+        else:
+            print(f"    完成所有回合（环境一直有改进）")
+
+    print("\n  ✓ 早停判定机制演示完成")
+
+
+def demo_full_integration():
+    """演示所有功能的完整集成"""
+    print("\n" + "=" * 60)
+    print("演示 6: 完整集成 - 所有新功能协同工作")
+    print("=" * 60)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        best_dir = os.path.join(tmpdir, "best")
+
+        config = TrainingConfig(
+            max_episodes=40,
+            max_steps_per_episode=50,
+            eval_freq=10,
+            eval_episodes=3,
+            save_freq=20,
+            early_stop_patience=30,
+            early_stop_min_improvement=0.1,
+            early_stop_metric="eval_reward",
+            verbose=True,
+            log_dir=tmpdir,
+            log_to_file=True,
+            log_to_console=False,
+            show_progress=True,
+            auto_save_best=True,
+            best_model_dir=best_dir,
+            checkpoint_on_interrupt=True,
+            separate_eval_env=False
+        )
+
+        print(f"\n  配置:")
+        print(f"    最大回合: {config.max_episodes}")
+        print(f"    评估频率: 每{config.eval_freq}回合")
+        print(f"    早停: 连续{config.early_stop_patience}轮无改进则停止")
+        print(f"    自动保存最优: {config.auto_save_best}")
+        print(f"    中断保存: {config.checkpoint_on_interrupt}")
+        print()
+
+        trainer = RLTrainer(config)
+        agent = QLearningAgent(
+            name="IntegrationAgent",
+            learning_rate=0.2,
+            epsilon=0.8,
+            epsilon_decay=0.95
+        )
+        env = SimpleTestEnvironment(difficulty=1)
+        eval_env = SimpleTestEnvironment(difficulty=1)
+
+        stats = trainer.train(agent, env, eval_environment=eval_env)
+
+        print(f"\n  训练总结:")
+        print(f"    完成回合: {len(stats.episode_rewards)}")
+        print(f"    最佳训练奖励: {stats.best_training_reward:.2f}")
+        print(f"    最佳评估奖励: {stats.best_eval_reward:.2f}")
+        print(f"    最优模型: {trainer.get_best_model_path() or '(无)'}")
+        print(f"    早停状态: {trainer.get_early_stop_state()}")
+        print(f"    异常统计: {trainer.get_exception_summary()}")
+
+        # 验证检查点文件
+        checkpoint_files = [f for f in os.listdir(tmpdir) if f.endswith('.json')]
+        print(f"    检查点文件: {checkpoint_files}")
+
+    print("\n  ✓ 完整集成演示完成")
 
 
 def demo_curriculum_learning():
     """演示改进的课程学习"""
     print("\n" + "=" * 60)
-    print("演示 6: 改进的课程学习设计")
+    print("演示 7: 改进的课程学习设计")
     print("=" * 60)
-    
+
     config = TrainingConfig(
         max_episodes=100,
         max_steps_per_episode=30,
         verbose=True,
         log_to_file=False,
+        log_to_console=False,
         show_progress=False,
-        eval_freq=20
+        eval_freq=20,
+        early_stop_patience=0
     )
-    
-    print("\n创建课程学习训练器...")
+
+    print("\n  创建课程学习训练器...")
     trainer = CurriculumTrainer(config)
-    
-    print("\n添加课程级别（从易到难）:")
-    print("  级别 1: 难度=1, 目标位置=10")
-    print("  级别 2: 难度=2, 目标位置=20")
-    print("  级别 3: 难度=3, 目标位置=30")
-    
+
     trainer.add_level(
         level_id="easy",
         difficulty=1,
@@ -380,7 +546,7 @@ def demo_curriculum_learning():
         max_episodes_per_level=50,
         description="简单级别 - 学习基本动作"
     )
-    
+
     trainer.add_level(
         level_id="medium",
         difficulty=2,
@@ -390,178 +556,75 @@ def demo_curriculum_learning():
         max_episodes_per_level=80,
         description="中等难度 - 巩固学习"
     )
-    
-    trainer.add_level(
-        level_id="hard",
-        difficulty=3,
-        environment_creator=create_environment_creator(3),
-        min_success_rate=0.5,
-        min_consecutive_success=2,
-        max_episodes_per_level=100,
-        description="困难级别 - 高级挑战"
-    )
-    
+
     agent = QLearningAgent(
         name="CurriculumAgent",
         learning_rate=0.2,
         epsilon=0.9,
         epsilon_decay=0.98
     )
-    
-    print("\n开始课程学习训练...")
-    
-    def on_level_up(info):
-        print(f"\n  🎉 升级! 从级别 {info['from_level']} 到 {info['to_level']}")
-        print(f"     级别ID: {info['level_id']}")
-    
-    stats = trainer.train(agent, callbacks={"on_level_up": on_level_up})
-    
-    print(f"\n课程学习结果:")
+
+    print("  开始课程学习训练...")
+    stats = trainer.train(agent)
+
     progress = trainer.get_level_progress()
+    print(f"\n  课程学习结果:")
     for p in progress:
-        status = "✓ 完成" if p['completed'] else "○ 未完成"
-        print(f"  级别 {p['level_id']}: {status}, 训练回合数={p['episodes_trained']}")
-    
-    completed_count = sum(1 for p in progress if p['completed'])
-    print(f"\n  完成级别: {completed_count} / {len(progress)}")
-    
-    print("\n✓ 课程学习演示完成")
+        status = "完成" if p['completed'] else "未完成"
+        print(f"    级别 {p['level_id']}: {status}, 训练{p['episodes_trained']}回合")
 
-
-def demo_early_stopping():
-    """演示早停机制"""
-    print("\n" + "=" * 60)
-    print("演示 7: 早停机制")
-    print("=" * 60)
-    
-    config = TrainingConfig(
-        max_episodes=200,
-        max_steps_per_episode=20,
-        early_stop_patience=20,
-        verbose=True,
-        log_to_file=False,
-        show_progress=False
-    )
-    
-    print(f"\n配置早停:")
-    print(f"  最大回合数: {config.max_episodes}")
-    print(f"  早停耐心值: {config.early_stop_patience} 回合无改进则停止")
-    
-    trainer = RLTrainer(config)
-    
-    class NoImprovementEnvironment:
-        def __init__(self):
-            self.state = 0
-            self.available_tools = ["move"]
-        
-        def reset(self):
-            self.state = 0
-            return {
-                "current_state": "running",
-                "state_variables": {"s": self.state},
-                "available_tools": self.available_tools
-            }
-        
-        def execute_tool(self, *args, **kwargs):
-            reward = random.random() * 0.1
-            self.state += 1
-            done = self.state >= 10
-            return "", reward, done, {"success": False}
-        
-        def get_observation(self):
-            return {
-                "current_state": "running" if self.state < 10 else "terminal",
-                "state_variables": {"s": self.state},
-                "available_tools": self.available_tools
-            }
-    
-    import random
-    agent = QLearningAgent("EarlyStopAgent")
-    env = NoImprovementEnvironment()
-    
-    print("\n开始训练（预期会提前停止）...")
-    stats = trainer.train(agent, env)
-    
-    actual_episodes = len(stats.episode_rewards)
-    print(f"\n训练结果:")
-    print(f"  配置最大回合数: {config.max_episodes}")
-    print(f"  实际训练回合数: {actual_episodes}")
-    print(f"  无改进回合数: {stats.episodes_without_improvement}")
-    
-    if actual_episodes < config.max_episodes:
-        print(f"  ✓ 早停生效！提前 {config.max_episodes - actual_episodes} 回合停止")
-    else:
-        print(f"  完成所有回合")
-    
-    print("\n✓ 早停机制演示完成")
+    print("\n  ✓ 课程学习演示完成")
 
 
 def run_all_demos():
     """运行所有演示"""
     print("\n" + "=" * 70)
-    print("环境工厂系统 - 改进功能完整演示")
+    print("强化学习训练器 - 增强功能完整演示")
     print("=" * 70)
-    print("\n本演示展示所有新增的改进功能：")
-    print("  1. 完整的异常处理")
-    print("  2. 模型保存/加载功能")
-    print("  3. 经验回放自动学习集成")
-    print("  4. 日志文件系统")
-    print("  5. 训练/评估模式分离")
-    print("  6. 改进的课程学习设计")
-    print("  7. 早停机制")
+    print("\n本演示展示所有新增功能：")
+    print("  1. 断点续训：中断后可加载模型接续训练")
+    print("  2. 自动保存最优模型：留存训练过程中效果最好的权重文件")
+    print("  3. 简易控制台进度条：实时展示单回合与整体训练进度")
+    print("  4. 运行异常捕获模块：报错自动记录日志且程序不会直接终止")
+    print("  5. 早停判定机制：连续多轮收益无提升时自动终止无效训练")
+    print("  6. 完整集成演示")
+    print("  7. 课程学习")
     print("=" * 70)
-    
-    try:
-        demo_exception_handling()
-    except Exception as e:
-        print(f"\n演示1失败: {e}")
-    
-    try:
-        demo_model_save_load()
-    except Exception as e:
-        print(f"\n演示2失败: {e}")
-    
-    try:
-        demo_experience_replay_integration()
-    except Exception as e:
-        print(f"\n演示3失败: {e}")
-    
-    try:
-        demo_logging_system()
-    except Exception as e:
-        print(f"\n演示4失败: {e}")
-    
-    try:
-        demo_training_eval_modes()
-    except Exception as e:
-        print(f"\n演示5失败: {e}")
-    
-    try:
-        demo_curriculum_learning()
-    except Exception as e:
-        print(f"\n演示6失败: {e}")
-    
-    try:
-        demo_early_stopping()
-    except Exception as e:
-        print(f"\n演示7失败: {e}")
-    
+
+    demos = [
+        ("断点续训", demo_checkpoint_resume),
+        ("自动保存最优模型", demo_auto_save_best_model),
+        ("控制台进度条", demo_console_progress_bar),
+        ("异常捕获模块", demo_exception_guard),
+        ("早停判定机制", demo_early_stop_mechanism),
+        ("完整集成", demo_full_integration),
+        ("课程学习", demo_curriculum_learning),
+    ]
+
+    for i, (name, demo_func) in enumerate(demos, 1):
+        try:
+            demo_func()
+        except Exception as e:
+            print(f"\n  演示{i}({name})失败: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+
     print("\n" + "=" * 70)
     print("所有演示完成！")
     print("=" * 70)
-    
-    print("\n改进总结:")
+
+    print("\n功能总结:")
     print("""
- ✓ 异常处理: 所有关键操作都有try-except保护，训练不会因单个错误崩溃
- ✓ 模型保存/加载: 所有智能体都有统一的save()/load()接口，支持持久化
- ✓ 经验回放: 训练器自动从回放缓冲区采样学习，支持优先经验回放
- ✓ 日志系统: 自动生成日志文件，时间戳、级别、消息完整记录
- ✓ 进度展示: 支持tqdm进度条，实时显示训练进度和指标
- ✓ 模式分离: training/eval模式分离，评估时禁用探索
- ✓ 课程学习: 灵活的级别配置，多种升级条件（成功率、连续成功、最大回合）
- ✓ 早停机制: 可配置耐心值，无改进时自动停止训练节省资源
- ✓ 环境隔离: 支持独立的评估环境，不污染训练状态
- ✓ epsilon同步: 训练器和智能体的探索率同步更新
+ ✓ 断点续训: 训练中断后自动保存检查点（含智能体权重），
+   重启时通过 resume_from_checkpoint 配置即可从断点继续训练
+ ✓ 自动保存最优模型: 每次评估后若性能提升则自动保存最优权重，
+   通过 auto_save_best + best_model_dir 配置
+ ✓ 控制台进度条: 内置 ConsoleProgressBar 无需第三方依赖，
+   实时显示整体进度、ETA、当前指标
+ ✓ 异常捕获模块: ExceptionGuard 自动分类记录异常到日志文件，
+   连续错误过多时建议终止，单次异常不中断训练
+ ✓ 早停机制: EarlyStopMonitor 支持多种监控指标，
+   配置 patience 和 min_improvement 自动终止无效训练
     """)
 
 

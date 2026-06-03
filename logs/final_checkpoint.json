@@ -1,0 +1,105 @@
+{
+  "checkpoint": {
+    "episode": 4,
+    "total_steps": 48,
+    "timestamp": 1780448360.0378711,
+    "config": {
+      "max_episodes": 5,
+      "max_steps_per_episode": 10,
+      "learning_rate": 0.1,
+      "discount_factor": 0.99,
+      "epsilon": 1.0,
+      "epsilon_decay": 0.995,
+      "epsilon_min": 0.01,
+      "batch_size": 32,
+      "replay_buffer_capacity": 10000,
+      "use_prioritized_replay": true,
+      "prioritized_replay_alpha": 0.6,
+      "prioritized_replay_beta": 0.4,
+      "replay_update_freq": 4,
+      "min_replay_size": 100,
+      "target_update_freq": 100,
+      "eval_freq": 100,
+      "eval_episodes": 10,
+      "save_freq": 500,
+      "verbose": false,
+      "log_dir": "./logs",
+      "log_level": 20,
+      "log_to_console": true,
+      "log_to_file": false,
+      "show_progress": false,
+      "max_time_seconds": null,
+      "early_stop_patience": 50,
+      "early_stop_min_improvement": 0.01,
+      "early_stop_metric": "eval_reward",
+      "resume_from_checkpoint": null,
+      "resume_agent_path": null,
+      "separate_eval_env": true,
+      "reward_shaping": null,
+      "gradient_clip": null,
+      "best_model_dir": null,
+      "auto_save_best": true,
+      "checkpoint_on_interrupt": true
+    },
+    "stats": {
+      "episode_rewards": [
+        0.0,
+        10.3,
+        -0.4,
+        -0.4,
+        0.0
+      ],
+      "episode_lengths": [
+        10,
+        8,
+        10,
+        10,
+        10
+      ],
+      "eval_rewards": [],
+      "losses": [],
+      "epsilon_values": [
+        1.0,
+        0.995,
+        0.990025,
+        0.985074875,
+        0.9801495006250001
+      ],
+      "timestamps": [
+        0.016897201538085938,
+        0.016982078552246094,
+        0.01703023910522461,
+        0.017073869705200195,
+        0.01711893081665039
+      ],
+      "learning_rates": [
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "best_eval_reward": -Infinity,
+      "best_training_reward": 10.3,
+      "episodes_without_improvement": 3
+    },
+    "agent_name": "TestAgent",
+    "agent_type": "QLearningAgent",
+    "best_reward": -Infinity,
+    "early_stop_state": {
+      "patience": 50,
+      "min_improvement": 0.01,
+      "metric": "eval_reward",
+      "best_value": null,
+      "rounds_without_improvement": 0,
+      "triggered": false,
+      "history_length": 0
+    },
+    "agent_save_path": "./logs\\final_checkpoint_agent.json"
+  },
+  "extra_info": {
+    "completed": true,
+    "stop_reason": "completed",
+    "elapsed_time": 0.01712632179260254
+  }
+}
