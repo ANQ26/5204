@@ -1,0 +1,68 @@
+{
+  "agent_type": "QLearningAgent",
+  "name": "TestAgent",
+  "total_steps": 48,
+  "episode_rewards": [
+    10.0
+  ],
+  "training": true,
+  "timestamp": 1780448360.0162756,
+  "learning_rate": 0.1,
+  "discount_factor": 0.99,
+  "epsilon": 0.9752487531218751,
+  "epsilon_decay": 0.995,
+  "epsilon_min": 0.01,
+  "initial_q_value": 0.0,
+  "q_table": {
+    "state=running|position=0": {
+      "move_right": 0.0786217271927564,
+      "move_left": -0.033753724953052074
+    },
+    "state=running|position=1": {
+      "move_left": -0.023249838221372728,
+      "move_right": 0.053085347002900005
+    },
+    "state=running|position=2": {
+      "move_right": 0.046240488100000005,
+      "move_left": -0.024148384623172002
+    },
+    "state=running|position=3": {
+      "move_left": -0.0192890013562,
+      "move_right": 0.11800000000000002
+    },
+    "state=running|position=4": {
+      "move_right": 1.0,
+      "move_left": 0.0016820000000000016
+    }
+  },
+  "action_counts": {
+    "state=running|position=0": {
+      "move_right": 9,
+      "move_left": 13
+    },
+    "state=running|position=1": {
+      "move_left": 5,
+      "move_right": 6
+    },
+    "state=running|position=2": {
+      "move_right": 4,
+      "move_left": 4
+    },
+    "state=running|position=3": {
+      "move_left": 3,
+      "move_right": 2
+    },
+    "state=running|position=4": {
+      "move_right": 1,
+      "move_left": 1
+    }
+  },
+  "state_visits": {
+    "state=running|position=0": 22,
+    "state=running|position=1": 11,
+    "state=running|position=2": 8,
+    "state=running|position=3": 5,
+    "state=running|position=4": 2
+  },
+  "_episode_count": 1
+}
